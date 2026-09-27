@@ -1,13 +1,13 @@
 # ── Top-level production crate ────────────────────────────────────────────────
 
 [package]
-name        = "cloudflare-quick-tunnel"
+name        = "dl-cloudflare-quick-tunnel"
 version     = "0.3.1"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Pure-Rust client for Cloudflare quick tunnels (https://*.trycloudflare.com) — no cloudflared subprocess. Speaks QUIC + capnp-RPC to the argotunnel edge directly. HTTP/1.1 + WebSocket Upgrade, HA pool, TCP keep-alive."
-repository  = "https://github.com/lordmacu/cloudflare-quick-tunnel-rs"
-homepage    = "https://github.com/lordmacu/cloudflare-quick-tunnel-rs"
+repository  = "https://github.com/shadow3aaa/cloudflare-quick-tunnel-rs"
+homepage    = "https://github.com/shadow3aaa/cloudflare-quick-tunnel-rs"
 readme      = "README.md"
 keywords    = ["cloudflare", "tunnel", "quic", "trycloudflare", "argotunnel"]
 categories  = ["network-programming"]
