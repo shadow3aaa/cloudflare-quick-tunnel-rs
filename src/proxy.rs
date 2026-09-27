@@ -127,6 +127,9 @@ fn analyse_request(req: &ConnectRequest) -> RequestShape {
             _ => {}
         }
     }
+    if matches!(req.conn_type, ConnectionType::Websocket) {
+        shape.is_upgrade = true;
+    }
     shape
 }
 
@@ -388,6 +391,7 @@ fn build_request_head(req: &ConnectRequest, keep_alive: bool) -> String {
     }
 
     let mut saw_connection = false;
+    let mut saw_upgrade = false;
     for (k, v) in &req.metadata {
         if let Some(name) = k.strip_prefix(&format!("{HTTP_HEADER_KEY}:")) {
             if name.eq_ignore_ascii_case("host") {
@@ -396,14 +400,27 @@ fn build_request_head(req: &ConnectRequest, keep_alive: bool) -> String {
             if name.eq_ignore_ascii_case("connection") {
                 saw_connection = true;
             }
+            if name.eq_ignore_ascii_case("upgrade") {
+                saw_upgrade = true;
+            }
             head.push_str(name);
             head.push_str(": ");
             head.push_str(v);
             head.push_str("\r\n");
         }
     }
-    // Tell the local server whether to keep the socket alive.
-    if !saw_connection {
+    // The Cloudflare edge strips the hop-by-hop `Connection` / `Upgrade`
+    // headers, so a WebSocket connection must have them re-synthesised here or
+    // the local origin never sees an upgrade and replies with plain HTTP.
+    if matches!(req.conn_type, ConnectionType::Websocket) {
+        if !saw_connection {
+            head.push_str("Connection: Upgrade\r\n");
+        }
+        if !saw_upgrade {
+            head.push_str("Upgrade: websocket\r\n");
+        }
+    } else if !saw_connection {
+        // Tell the local server whether to keep the socket alive.
         if keep_alive {
             head.push_str("Connection: keep-alive\r\n");
         } else {
