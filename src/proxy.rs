@@ -431,18 +431,58 @@ fn build_request_head(req: &ConnectRequest, keep_alive: bool) -> String {
     head
 }
 
+/// Request-target (path + query) for an inbound connect destination.
+///
+/// Absolute-form `http`/`https` URIs keep path and query. Other schemes are
+/// not rewritten to `/`. Origin-form targets that already start with `/` are
+/// kept, including their query string. Anything else defaults to `/`.
 fn extract_path(dest: &str) -> String {
-    if let Some(after_scheme) = dest.find("://") {
-        let rest = &dest[after_scheme + 3..];
-        if let Some(slash) = rest.find('/') {
-            return rest[slash..].to_string();
+    if let Some(scheme) = scheme_of(dest) {
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return dest.to_string();
         }
-        return "/".into();
+        return path_and_query(dest).unwrap_or_else(|| "/".to_string());
     }
     if dest.starts_with('/') {
-        return dest.to_string();
+        dest.to_string()
+    } else {
+        "/".into()
     }
-    "/".into()
+}
+
+fn scheme_of(dest: &str) -> Option<&str> {
+    let (scheme, rest) = dest.split_once("://")?;
+    if scheme.is_empty() || rest.is_empty() {
+        return None;
+    }
+    if scheme
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
+    {
+        Some(scheme)
+    } else {
+        None
+    }
+}
+
+fn path_and_query(dest: &str) -> Option<String> {
+    let rest = dest.split_once("://")?.1;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    if authority_end == 0 {
+        return None;
+    }
+    let after_authority = &rest[authority_end..];
+    let without_fragment = after_authority
+        .split_once('#')
+        .map(|(path, _)| path)
+        .unwrap_or(after_authority);
+    if without_fragment.is_empty() {
+        return Some("/".to_string());
+    }
+    if without_fragment.starts_with('?') {
+        return Some(format!("/{without_fragment}"));
+    }
+    Some(without_fragment.to_string())
 }
 
 async fn write_error_response<W>(writer: &mut W, status: u16, msg: &str) -> Result<(), TunnelError>
@@ -658,6 +698,16 @@ mod tests {
         );
         assert_eq!(extract_path("https://abc.trycloudflare.com"), "/");
         assert_eq!(extract_path("/relative/x"), "/relative/x");
+        assert_eq!(extract_path("/relative/x?q=1&b=2"), "/relative/x?q=1&b=2");
+        assert_eq!(
+            extract_path("https://abc.trycloudflare.com/path?q=a%20b#frag"),
+            "/path?q=a%20b"
+        );
+        assert_eq!(
+            extract_path("ws://abc.trycloudflare.com/socket"),
+            "ws://abc.trycloudflare.com/socket"
+        );
+        assert_eq!(extract_path("not a url"), "/");
     }
 
     #[test]
