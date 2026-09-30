@@ -204,8 +204,19 @@ async fn resolve_srv(
 fn shuffled(input: &[EdgeAddr]) -> Vec<EdgeAddr> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // `Instant::now().elapsed()` is a single fixed offset on a monotonic
+    // clock, so hashing it only ever rotates once. Mix a per-call counter
+    // with the addresses so successive callers see a different head edge.
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
     let mut h = DefaultHasher::new();
-    Instant::now().elapsed().as_nanos().hash(&mut h);
+    call.hash(&mut h);
+    for edge in input {
+        edge.ip.hash(&mut h);
+        edge.port.hash(&mut h);
+    }
     let n = input.len().max(1);
     let offset = (h.finish() as usize) % n;
     let mut out = Vec::with_capacity(input.len());

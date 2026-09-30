@@ -31,11 +31,7 @@ use crate::quic_metadata_protocol_capnp;
 
 /// 6-byte tag the edge writes first to disambiguate stream kinds.
 /// We only ever see `DATA_STREAM_SIGNATURE` on per-request streams.
-/// `RPC_STREAM_SIGNATURE` is reserved for the cloudflared-server
-/// RPC (session manager / config), which the edge does NOT open
-/// against quick tunnels.
 pub const DATA_STREAM_SIGNATURE: [u8; 6] = [0x0A, 0x36, 0xCD, 0x12, 0xA1, 0x3E];
-pub const RPC_STREAM_SIGNATURE: [u8; 6] = [0x52, 0xBB, 0x82, 0x5C, 0xDB, 0x65];
 
 /// Two ASCII bytes (`"01"`). cloudflared treats `readVersion` as a
 /// NO-OP for now — kept here verbatim so a future bump shows up

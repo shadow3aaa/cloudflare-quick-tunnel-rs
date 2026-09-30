@@ -28,9 +28,10 @@ use tracing::{debug, warn};
 use crate::error::TunnelError;
 use crate::pool::Pool;
 use crate::stream::{
-    self, ConnectRequest, ConnectionType, HTTP_HEADER_KEY, HTTP_HOST_KEY, HTTP_METHOD_KEY,
-    HTTP_STATUS_KEY,
+    self, ConnectRequest, ConnectionType, HTTP_HOST_KEY, HTTP_METHOD_KEY, HTTP_STATUS_KEY,
 };
+#[cfg(test)]
+use crate::stream::HTTP_HEADER_KEY;
 
 /// Byte counters the supervisor accumulates across all streams.
 #[derive(Debug, Default, Clone)]
@@ -93,6 +94,8 @@ impl RequestShape {
     }
 }
 
+const HTTP_HEADER_PREFIX: &str = "HttpHeader:";
+
 fn analyse_request(req: &ConnectRequest) -> RequestShape {
     let mut shape = RequestShape {
         content_length: None,
@@ -101,7 +104,7 @@ fn analyse_request(req: &ConnectRequest) -> RequestShape {
         wants_close: false,
     };
     for (k, v) in &req.metadata {
-        let Some(name) = k.strip_prefix(&format!("{HTTP_HEADER_KEY}:")) else {
+        let Some(name) = k.strip_prefix(HTTP_HEADER_PREFIX) else {
             continue;
         };
         let lname = name.to_ascii_lowercase();
@@ -146,6 +149,7 @@ impl ResponseShape {
         self.content_length.is_some() && !self.is_chunked && !self.is_upgrade && !self.wants_close
     }
 }
+
 
 fn analyse_response(status: u16, headers: &[(String, String)]) -> ResponseShape {
     let mut shape = ResponseShape {
@@ -261,13 +265,7 @@ where
     let resp_shape = analyse_response(status, &headers);
 
     // 3. Echo status + headers back to edge.
-    let mut meta: Vec<(String, String)> = Vec::with_capacity(headers.len() + 1);
-    meta.push((HTTP_STATUS_KEY.into(), status.to_string()));
-    for (name, value) in &headers {
-        meta.push((format!("{HTTP_HEADER_KEY}:{name}"), value.clone()));
-    }
-    let meta_refs: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    stream::write_connect_response(&mut to_edge, "", &meta_refs).await?;
+    write_origin_response(&mut to_edge, status, &headers).await?;
 
     // 4. Flush any header-over-read bytes (start of body) first.
     if !leftover.is_empty() {
@@ -345,14 +343,7 @@ where
             header_count = headers.len(),
             "origin response (bidi)"
         );
-        let mut meta: Vec<(String, String)> = Vec::with_capacity(headers.len() + 1);
-        meta.push((HTTP_STATUS_KEY.into(), status.to_string()));
-        for (name, value) in &headers {
-            meta.push((format!("{HTTP_HEADER_KEY}:{name}"), value.clone()));
-        }
-        let meta_refs: Vec<(&str, &str)> =
-            meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        stream::write_connect_response(&mut to_edge, "", &meta_refs).await?;
+        write_origin_response(&mut to_edge, status, &headers).await?;
         if !leftover.is_empty() {
             to_edge
                 .write_all(&leftover)
@@ -393,7 +384,7 @@ fn build_request_head(req: &ConnectRequest, keep_alive: bool) -> String {
     let mut saw_connection = false;
     let mut saw_upgrade = false;
     for (k, v) in &req.metadata {
-        if let Some(name) = k.strip_prefix(&format!("{HTTP_HEADER_KEY}:")) {
+        if let Some(name) = k.strip_prefix(HTTP_HEADER_PREFIX) {
             if name.eq_ignore_ascii_case("host") {
                 continue;
             }
@@ -489,9 +480,62 @@ async fn write_error_response<W>(writer: &mut W, status: u16, msg: &str) -> Resu
 where
     W: futures::io::AsyncWrite + Unpin,
 {
-    let meta = [(HTTP_STATUS_KEY, status.to_string())];
-    let refs: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    stream::write_connect_response(writer, msg, &refs).await?;
+    let status_value = status.to_string();
+    stream::write_connect_response(writer, msg, &[(HTTP_STATUS_KEY, status_value.as_str())]).await?;
+    Ok(())
+}
+
+/// Write `HttpStatus` and each raw origin header as `HttpHeader:<Name>`.
+/// Each key is copied into the capnp message immediately, so there is no
+/// owned metadata vector and no second pass that reborrows it.
+async fn write_origin_response<W>(
+    writer: &mut W,
+    status: u16,
+    headers: &[(String, String)],
+) -> Result<(), TunnelError>
+where
+    W: futures::io::AsyncWrite + Unpin,
+{
+    use capnp::message::Builder;
+    use capnp_futures::serialize;
+
+    writer
+        .write_all(&stream::DATA_STREAM_SIGNATURE)
+        .await
+        .map_err(|e| TunnelError::Internal(format!("write signature: {e}")))?;
+    writer
+        .write_all(&stream::PROTOCOL_V1)
+        .await
+        .map_err(|e| TunnelError::Internal(format!("write version: {e}")))?;
+
+    let status_value = status.to_string();
+    let mut message = Builder::new_default();
+    {
+        let mut root: crate::quic_metadata_protocol_capnp::connect_response::Builder =
+            message.init_root();
+        root.set_error("");
+        let mut meta = root.init_metadata((headers.len() + 1) as u32);
+        {
+            let mut entry = meta.reborrow().get(0);
+            entry.set_key(HTTP_STATUS_KEY);
+            entry.set_val(&status_value);
+        }
+        for (i, (name, value)) in headers.iter().enumerate() {
+            let mut key = String::with_capacity(HTTP_HEADER_PREFIX.len() + name.len());
+            key.push_str(HTTP_HEADER_PREFIX);
+            key.push_str(name);
+            let mut entry = meta.reborrow().get((i + 1) as u32);
+            entry.set_key(&key);
+            entry.set_val(value);
+        }
+    }
+    serialize::write_message(&mut *writer, &message)
+        .await
+        .map_err(|e| TunnelError::Internal(format!("write capnp: {e}")))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| TunnelError::Internal(format!("flush: {e}")))?;
     Ok(())
 }
 

@@ -22,7 +22,6 @@
 
 use std::time::Duration;
 
-use capnp::capability::Promise;
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 
 // ── Stub server-side bootstrap ────────────────────────────────────────────────
@@ -45,7 +44,6 @@ struct StubCloudflaredServer;
 impl tunnelrpc_capnp::session_manager::Server for StubCloudflaredServer {}
 impl tunnelrpc_capnp::configuration_manager::Server for StubCloudflaredServer {}
 impl tunnelrpc_capnp::cloudflared_server::Server for StubCloudflaredServer {}
-use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, info};
 use uuid::Uuid;
@@ -443,22 +441,6 @@ fn decode_connection_response(
             })
         }
     }
-}
-
-// Silence "unused" for the wrapper helpers in scaffold builds.
-#[allow(dead_code)]
-async fn drive<F: std::future::Future>(
-    f: F,
-    label: &'static str,
-) -> Result<F::Output, TunnelError> {
-    timeout(DEFAULT_RPC_TIMEOUT, f)
-        .await
-        .map_err(|_| TunnelError::Register(format!("{label} timed out")))
-}
-
-#[allow(dead_code)]
-fn _suppress_unused_promise() -> Promise<(), capnp::Error> {
-    Promise::ok(())
 }
 
 #[cfg(test)]

@@ -72,7 +72,8 @@ pub struct QuickTunnelHandle {
     /// Fires the shutdown signal to every HA reactor at once.
     /// `Notify` is shared across N reactors via `Arc`; we don't
     /// use `oneshot` because we'd need one per reactor.
-    shutdown: Arc<tokio::sync::Notify>,
+    /// The duration is the `unregisterConnection` budget reactors honour.
+    shutdown: Arc<(tokio::sync::Notify, std::sync::Mutex<Duration>)>,
     reactors: Vec<tokio::task::JoinHandle<()>>,
     metrics_view: SupervisorMetrics,
     reconnects: Arc<std::sync::atomic::AtomicU64>,
@@ -91,13 +92,13 @@ impl QuickTunnelHandle {
 
     /// Signal every HA reactor to drain + unregister + close, then
     /// await them all.
-    pub async fn shutdown_with(mut self, _grace: Duration) -> Result<(), TunnelError> {
-        // `_grace` is honoured inside each reactor — they call
-        // `ControlSession::shutdown_graceful(DEFAULT_GRACE_PERIOD)`
-        // unconditionally on the way out. We keep the grace param
-        // in the API for forward compatibility; once it matters,
-        // pass it through via a richer shutdown command.
-        self.shutdown.notify_waiters();
+    pub async fn shutdown_with(mut self, grace: Duration) -> Result<(), TunnelError> {
+        *self
+            .shutdown
+            .1
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = grace;
+        self.shutdown.0.notify_waiters();
         for j in self.reactors.drain(..) {
             j.await
                 .map_err(|e| TunnelError::Internal(format!("reactor join: {e}")))?;
@@ -114,7 +115,7 @@ impl Drop for QuickTunnelHandle {
     fn drop(&mut self) {
         // Notify all reactors; the detached tasks wind down on
         // their own. Drop is sync so we can't join them here.
-        self.shutdown.notify_waiters();
+        self.shutdown.0.notify_waiters();
     }
 }
 
@@ -201,7 +202,10 @@ impl QuickTunnelManager {
 
         let metrics = SupervisorMetrics::default();
         let reconnects = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown = Arc::new((
+            tokio::sync::Notify::new(),
+            std::sync::Mutex::new(DEFAULT_GRACE_PERIOD),
+        ));
         // One TCP keep-alive pool shared by every HA reactor —
         // they all proxy to the same `127.0.0.1:<local_port>` so a
         // single LIFO cache of idle sockets serves the whole tunnel.
@@ -308,14 +312,14 @@ async fn reactor_loop(
     pool: Arc<Pool>,
     mut conn: quinn::Connection,
     mut control: ControlSession,
-    shutdown: Arc<tokio::sync::Notify>,
+    shutdown: Arc<(tokio::sync::Notify, std::sync::Mutex<Duration>)>,
 ) {
     debug!(conn_index, "reactor loop started");
     loop {
         // ── Supervise current connection ─────────────────────────────────────
         let (sup_tx, sup_rx) = oneshot::channel();
         let metrics_for_cycle = metrics.clone();
-        let shutdown_wait = shutdown.notified();
+        let shutdown_wait = shutdown.0.notified();
         tokio::pin!(shutdown_wait);
         let exit = tokio::select! {
             biased;
@@ -331,7 +335,8 @@ async fn reactor_loop(
 
         match exit {
             SupervisorExit::Shutdown => {
-                control.shutdown_graceful(DEFAULT_GRACE_PERIOD).await;
+                let grace = *shutdown.1.lock().unwrap_or_else(|e| e.into_inner());
+                control.shutdown_graceful(grace).await;
                 debug!(conn_index, "reactor: clean shutdown");
                 return;
             }
@@ -351,7 +356,7 @@ async fn reactor_loop(
                     }
                     let delay = backoff(attempt);
                     warn!(conn_index, attempt, ?delay, "reactor: scheduling reconnect");
-                    let shutdown_wait = shutdown.notified();
+                    let shutdown_wait = shutdown.0.notified();
                     tokio::pin!(shutdown_wait);
                     tokio::select! {
                         biased;
@@ -402,7 +407,7 @@ async fn reactor_loop_after_failure(
     metrics: SupervisorMetrics,
     reconnects: Arc<std::sync::atomic::AtomicU64>,
     pool: Arc<Pool>,
-    shutdown: Arc<tokio::sync::Notify>,
+    shutdown: Arc<(tokio::sync::Notify, std::sync::Mutex<Duration>)>,
 ) {
     let mut attempt = 0u32;
     loop {
@@ -421,7 +426,7 @@ async fn reactor_loop_after_failure(
             ?delay,
             "HA reactor: scheduling initial register retry"
         );
-        let shutdown_wait = shutdown.notified();
+        let shutdown_wait = shutdown.0.notified();
         tokio::pin!(shutdown_wait);
         tokio::select! {
             biased;
