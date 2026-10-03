@@ -93,11 +93,7 @@ impl QuickTunnelHandle {
     /// Signal every HA reactor to drain + unregister + close, then
     /// await them all.
     pub async fn shutdown_with(mut self, grace: Duration) -> Result<(), TunnelError> {
-        *self
-            .shutdown
-            .1
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = grace;
+        *self.shutdown.1.lock().unwrap_or_else(|e| e.into_inner()) = grace;
         self.shutdown.0.notify_waiters();
         for j in self.reactors.drain(..) {
             j.await

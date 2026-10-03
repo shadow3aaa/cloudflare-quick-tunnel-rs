@@ -27,11 +27,11 @@ use tracing::{debug, warn};
 
 use crate::error::TunnelError;
 use crate::pool::Pool;
+#[cfg(test)]
+use crate::stream::HTTP_HEADER_KEY;
 use crate::stream::{
     self, ConnectRequest, ConnectionType, HTTP_HOST_KEY, HTTP_METHOD_KEY, HTTP_STATUS_KEY,
 };
-#[cfg(test)]
-use crate::stream::HTTP_HEADER_KEY;
 
 /// Byte counters the supervisor accumulates across all streams.
 #[derive(Debug, Default, Clone)]
@@ -149,7 +149,6 @@ impl ResponseShape {
         self.content_length.is_some() && !self.is_chunked && !self.is_upgrade && !self.wants_close
     }
 }
-
 
 fn analyse_response(status: u16, headers: &[(String, String)]) -> ResponseShape {
     let mut shape = ResponseShape {
@@ -481,7 +480,8 @@ where
     W: futures::io::AsyncWrite + Unpin,
 {
     let status_value = status.to_string();
-    stream::write_connect_response(writer, msg, &[(HTTP_STATUS_KEY, status_value.as_str())]).await?;
+    stream::write_connect_response(writer, msg, &[(HTTP_STATUS_KEY, status_value.as_str())])
+        .await?;
     Ok(())
 }
 
